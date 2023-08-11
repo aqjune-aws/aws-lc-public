@@ -135,21 +135,34 @@ extern void curve25519_x25519base_byte_alt(uint8_t res[static 32], const uint8_t
 // Input: x[32]; output: z[64]; temporary buffer: t[>=72]
 extern void bignum_ksqr_32_64(uint64_t z[static 64], const uint64_t x[static 32],
                               uint64_t t[static 72]);
+extern void bignum_ksqr_32_64_neon(uint64_t z[static 64], const uint64_t x[static 32],
+                                   uint64_t t[static 72]);
 
 // Evaluate z := x^2 where x is a 1024-bit integer.
 // Input: x[16]; output: z[32]; temporary buffer: t[>=24]
 extern void bignum_ksqr_16_32(uint64_t z[static 32], const uint64_t x[static 16],
                               uint64_t t[static 24]);
+extern void bignum_ksqr_16_32_neon(uint64_t z[static 32],
+                                   const uint64_t x[static 16],
+                                   uint64_t t[static 24]);
 
 // Evaluate z := x * y where x and y are 2048-bit integers.
 // Inputs: x[32], y[32]; output: z[64]; temporary buffer t[>=96]
 extern void bignum_kmul_32_64(uint64_t z[static 64], const uint64_t x[static 32],
                               const uint64_t y[static 32], uint64_t t[static 96]);
+extern void bignum_kmul_32_64_neon(uint64_t z[static 64],
+                                   const uint64_t x[static 32],
+                                   const uint64_t y[static 32],
+                                   uint64_t t[static 96]);
 
 // Evaluate z := x * y where x and y are 1024-bit integers.
 // Inputs: x[16], y[16]; output: z[32]; temporary buffer t[>=32]
 extern void bignum_kmul_16_32(uint64_t z[static 32], const uint64_t x[static 16],
                               const uint64_t y[static 16], uint64_t t[static 32]);
+extern void bignum_kmul_16_32_neon(uint64_t z[static 32],
+                                   const uint64_t x[static 16],
+                                   const uint64_t y[static 16],
+                                   uint64_t t[static 32]);
 
 // Extended Montgomery reduce in 8-digit blocks.
 // Assumes that z initially holds a 2k-digit bignum z_0, m is a k-digit odd
@@ -168,6 +181,8 @@ extern void bignum_kmul_16_32(uint64_t z[static 32], const uint64_t x[static 16]
 // Inputs: z[2*k], m[k], w; outputs: function return (extra result bit) and z[2*k]
 extern uint64_t bignum_emontredc_8n(uint64_t k, uint64_t *z, const uint64_t *m,
                                     uint64_t w);
+extern uint64_t bignum_emontredc_8n_neon(uint64_t k, uint64_t *z, const uint64_t *m,
+                                         uint64_t w);
 
 // Optionally subtract, z := x - y (if p nonzero) or z := x (if p zero)
 // Inputs: x[k], p, y[k]; outputs: function return (carry-out) and z[k]

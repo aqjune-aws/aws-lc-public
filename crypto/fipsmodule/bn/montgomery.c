@@ -478,6 +478,27 @@ static void montgomery_s2n_bignum_mul_mont(BN_ULONG *rp, const BN_ULONG *ap,
   // Given m the prime number stored at np, m * w = -1 mod 2^64.
   uint64_t w = n0[0];
 
+#if defined(__ARM_NEON)
+
+  if (num == 32) {
+    if (ap == bp)
+      bignum_ksqr_32_64_neon(mulres, ap, t);
+    else
+      bignum_kmul_32_64_neon(mulres, ap, bp, t);
+  } else if (num == 16) {
+    if (ap == bp)
+      bignum_ksqr_16_32_neon(mulres, ap, t);
+    else
+      bignum_kmul_16_32_neon(mulres, ap, bp, t);
+  } else {
+    if (ap == bp)
+      bignum_sqr(num * 2, mulres, num, ap);
+    else
+      bignum_mul(num * 2, mulres, num, ap, num, bp);
+  }
+
+#else
+
   if (num == 32) {
     if (ap == bp)
       bignum_ksqr_32_64(mulres, ap, t);
@@ -495,6 +516,8 @@ static void montgomery_s2n_bignum_mul_mont(BN_ULONG *rp, const BN_ULONG *ap,
       bignum_mul(num * 2, mulres, num, ap, num, bp);
   }
 
+#endif
+
   // Do montgomery reduction. We follow the definition of montgomery reduction
   // which is:
   // 1. Calculate (mulres + ((mulres mod R) * (-m^-1 mod R) mod R) * m) / R
@@ -507,7 +530,12 @@ static void montgomery_s2n_bignum_mul_mont(BN_ULONG *rp, const BN_ULONG *ap,
   //       returned 1. Since m is less than 2^(64*num), (result of step 1) >= m holds.
   //    B. The result of step 1 fits in 2^(64*num), and the result >= m.
   uint64_t c;
+
+#if defined(__ARM_ARCH)
+  c = bignum_emontredc_8n_neon(num, mulres, np, w); // c: case A
+#else
   c = bignum_emontredc_8n(num, mulres, np, w); // c: case A
+#endif
   c |= bignum_ge(num, mulres + num, num, np);  // c: case B
   // Optionally subtract and store the result at rp
   bignum_optsub(num, rp, mulres + num, c, np);
