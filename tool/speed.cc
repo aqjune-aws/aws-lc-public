@@ -383,6 +383,79 @@ static bool SpeedRSA(const std::string &selected) {
   return true;
 }
 
+static bool SpeedModExp(const std::string &selected) {
+  if (selected != "ModExp") {
+    return true;
+  }
+
+  BN_CTX *ctx = BN_CTX_new();
+  BN_CTX_start(ctx);
+  uint8_t *dummy_prime = (uint8_t *)malloc(512);
+  memset(dummy_prime, 0, 512);
+  dummy_prime[0] = 0x1b;
+  dummy_prime[1] = 0xa0;
+  dummy_prime[2] = 0xd3;
+  dummy_prime[3] = 0xfe;
+  dummy_prime[4] = 0x51;
+  dummy_prime[5] = 0xcf;
+  dummy_prime[6] = 0xfd;
+  dummy_prime[7] = 0x0e;
+  dummy_prime[8] = 0x79;
+  dummy_prime[9] = 0x98;
+  dummy_prime[10] = 0x88;
+  dummy_prime[11] = 0x17;
+  dummy_prime[12] = 0x2f;
+  dummy_prime[13] = 0x71;
+  dummy_prime[14] = 0x14;
+  dummy_prime[15] = 0xb5;
+  dummy_prime[16] = 0x0e;
+
+  uint8_t *dummy_num = (uint8_t *)malloc(512);
+  memset(dummy_num, 0, 512);
+  dummy_num[0] = 1;
+
+  //   ((b) > 937 ? 6 : (b) > 306 ? 5 : (b) > 89 ? 4 : (b) > 22 ? 3 : 1)
+#define WORD_COUNT(x) (((x) + 63) / 64)
+  const int byte_lengths[7] = {
+      WORD_COUNT(22) * 8,
+      WORD_COUNT(89) * 8,
+      WORD_COUNT(306) * 8,
+      WORD_COUNT(937) * 8,
+      WORD_COUNT(1024) * 8,
+      WORD_COUNT(2048) * 8,
+      WORD_COUNT(4096) * 8
+  };
+
+  for (int i = 0; i < 7; ++i) {
+    BIGNUM *a = BN_le2bn(dummy_num, byte_lengths[i], NULL);
+    BIGNUM *e = BN_le2bn(dummy_num, byte_lengths[i], NULL);
+    BIGNUM *m = BN_le2bn(dummy_prime, byte_lengths[i], NULL);
+    BIGNUM *ret = BN_new();
+    bssl::UniquePtr<BN_MONT_CTX> mont(BN_MONT_CTX_new_for_modulus(m, ctx));
+
+    TimeResults results;
+    if (!TimeFunction(&results, [&ret, &a, &e, &m, &ctx, &mont]() -> bool {
+          return BN_mod_exp_mont_consttime(ret, a, e, m, ctx, mont.get());
+        })) {
+      fprintf(stderr, "BN_mod_exp_mont_consttime failed.\n");
+      ERR_print_errors_fp(stderr);
+      return false;
+    }
+    results.Print(selected + " " + std::to_string(byte_lengths[i]*8) + " bits");
+    BN_free(a);
+    BN_free(e);
+    BN_free(m);
+    BN_free(ret);
+  }
+
+  free(dummy_num);
+  free(dummy_prime);
+
+  BN_CTX_end(ctx);
+  BN_CTX_free(ctx);
+  return true;
+}
+
 static bool SpeedRSAKeyGen(bool is_fips, const std::string &selected) {
   // Don't run this by default because it's so slow.
   if (selected != "RSAKeyGen") {
@@ -2302,6 +2375,55 @@ static bool SpeedDHcheck(std::string selected) {
   return true;
 }
 
+static bool SpeedDHgenerate(size_t prime_bit_length) {
+
+  TimeResults results;
+  BM_NAMESPACE::UniquePtr<DH> dh_params(DH_new());
+  if (dh_params == nullptr) {
+    return false;
+  }
+
+  // DH_generate_parameters_ex grows exponentially slower as prime length grows.
+  if (DH_generate_parameters_ex(dh_params.get(), prime_bit_length,
+    DH_GENERATOR_2, nullptr) != 1) {
+    return false;
+  }
+
+  if (!TimeFunction(&results, [&dh_params]() -> bool {
+        if (DH_generate_key(dh_params.get()) != 1) {
+          return false;
+        }
+        return true;
+      })) {
+    return false;
+  }
+
+  results.PrintWithPrimes("DH generate key(s)", prime_bit_length);
+  return true;
+}
+
+static bool SpeedDHgeneratekey(std::string selected) {
+  // Don't run this by default because it's so slow.
+  if (selected != "dhgeneratekey") {
+    return true;
+  }
+
+  uint64_t maybe_reset_timeout = g_timeout_seconds;
+  if (g_timeout_seconds == TIMEOUT_SECONDS_DEFAULT) {
+    g_timeout_seconds = 10;
+  }
+
+  for (size_t prime_bit_length : g_prime_bit_lengths) {
+    if (!SpeedDHgenerate(prime_bit_length)) {
+      return false;
+    }
+  }
+
+  g_timeout_seconds = maybe_reset_timeout;
+
+  return true;
+}
+
 #if AWSLC_API_VERSION > 16
 static bool SpeedPKCS8(const std::string &selected) {
   if (!selected.empty() && selected.find("pkcs8") == std::string::npos) {
@@ -2539,106 +2661,127 @@ bool Speed(const std::vector<std::string> &args) {
   }
 
   for (std::string selected : g_filters) {
-    if(!SpeedAESBlock("AES-128", 128, selected) ||
-       !SpeedAESBlock("AES-192", 192, selected) ||
-       !SpeedAESBlock("AES-256", 256, selected) ||
-       !SpeedAESGeneric(EVP_aes_128_gcm(), "EVP-AES-128-GCM", kTLSADLen, selected) ||
-       !SpeedAESGeneric(EVP_aes_192_gcm(), "EVP-AES-192-GCM", kTLSADLen, selected) ||
-       !SpeedAESGeneric(EVP_aes_256_gcm(), "EVP-AES-256-GCM", kTLSADLen, selected) ||
-       !SpeedAESGeneric(EVP_aes_128_ctr(), "EVP-AES-128-CTR", kTLSADLen, selected) ||
-       !SpeedAESGeneric(EVP_aes_192_ctr(), "EVP-AES-192-CTR", kTLSADLen, selected) ||
-       !SpeedAESGeneric(EVP_aes_256_ctr(), "EVP-AES-256-CTR", kTLSADLen, selected) ||
-       !SpeedAES256XTS("AES-256-XTS", selected) ||
-       // OpenSSL 3.0 doesn't allow MD4 calls
+    if (!SpeedAESBlock("AES-128", 128, selected) ||
+        !SpeedAESBlock("AES-192", 192, selected) ||
+        !SpeedAESBlock("AES-256", 256, selected) ||
+        !SpeedAESGeneric(EVP_aes_128_gcm(), "EVP-AES-128-GCM", kTLSADLen,
+                         selected) ||
+        !SpeedAESGeneric(EVP_aes_192_gcm(), "EVP-AES-192-GCM", kTLSADLen,
+                         selected) ||
+        !SpeedAESGeneric(EVP_aes_256_gcm(), "EVP-AES-256-GCM", kTLSADLen,
+                         selected) ||
+        !SpeedAESGeneric(EVP_aes_128_ctr(), "EVP-AES-128-CTR", kTLSADLen,
+                         selected) ||
+        !SpeedAESGeneric(EVP_aes_192_ctr(), "EVP-AES-192-CTR", kTLSADLen,
+                         selected) ||
+        !SpeedAESGeneric(EVP_aes_256_ctr(), "EVP-AES-256-CTR", kTLSADLen,
+                         selected) ||
+        !SpeedAES256XTS("AES-256-XTS", selected) ||
+    // OpenSSL 3.0 doesn't allow MD4 calls
 #if !defined(OPENSSL_3_0_BENCHMARK)
-       !SpeedHash(EVP_md4(), "MD4", selected) ||
+        !SpeedHash(EVP_md4(), "MD4", selected) ||
 #endif
-       !SpeedHash(EVP_md5(), "MD5", selected) ||
-       !SpeedHash(EVP_sha1(), "SHA-1", selected) ||
-       !SpeedHash(EVP_sha224(), "sha-224", selected) ||
-       !SpeedHash(EVP_sha256(), "SHA-256", selected) ||
-       !SpeedHash(EVP_sha384(), "SHA-384", selected) ||
-       !SpeedHash(EVP_sha512(), "SHA-512", selected) ||
+        !SpeedHash(EVP_md5(), "MD5", selected) ||
+        !SpeedHash(EVP_sha1(), "SHA-1", selected) ||
+        !SpeedHash(EVP_sha224(), "sha-224", selected) ||
+        !SpeedHash(EVP_sha256(), "SHA-256", selected) ||
+        !SpeedHash(EVP_sha384(), "SHA-384", selected) ||
+        !SpeedHash(EVP_sha512(), "SHA-512", selected) ||
        // OpenSSL 1.0 and BoringSSL don't support SHA3.
 #if (!defined(OPENSSL_1_0_BENCHMARK) && !defined(BORINGSSL_BENCHMARK)) || AWSLC_API_VERSION > 16
-       !SpeedHash(EVP_sha3_224(), "SHA3-224", selected) ||
-       !SpeedHash(EVP_sha3_256(), "SHA3-256", selected) ||
-       !SpeedHash(EVP_sha3_384(), "SHA3-384", selected) ||
-       !SpeedHash(EVP_sha3_512(), "SHA3-512", selected) ||
+        !SpeedHash(EVP_sha3_224(), "SHA3-224", selected) ||
+        !SpeedHash(EVP_sha3_256(), "SHA3-256", selected) ||
+        !SpeedHash(EVP_sha3_384(), "SHA3-384", selected) ||
+        !SpeedHash(EVP_sha3_512(), "SHA3-512", selected) ||
 #endif
-       !SpeedHmac(EVP_md5(), "HMAC-MD5", selected) ||
-       !SpeedHmac(EVP_sha1(), "HMAC-SHA1", selected) ||
-       !SpeedHmac(EVP_sha256(), "HMAC-SHA256", selected) ||
-       !SpeedHmac(EVP_sha384(), "HMAC-SHA384", selected) ||
-       !SpeedHmac(EVP_sha512(), "HMAC-SHA512", selected) ||
-       !SpeedHmacOneShot(EVP_md5(), "HMAC-MD5-OneShot", selected) ||
-       !SpeedHmacOneShot(EVP_sha1(), "HMAC-SHA1-OneShot", selected) ||
-       !SpeedHmacOneShot(EVP_sha256(), "HMAC-SHA256-OneShot", selected) ||
-       !SpeedHmacOneShot(EVP_sha384(), "HMAC-SHA384-OneShot", selected) ||
-       !SpeedHmacOneShot(EVP_sha512(), "HMAC-SHA512-OneShot", selected) ||
-       !SpeedRandom(selected) ||
-       !SpeedECDH(selected) ||
-       !SpeedECDSA(selected) ||
-       !SpeedECKeyGen(selected) ||
-       !SpeedECKeyGenerateKey(false, selected) ||
+        !SpeedHmac(EVP_md5(), "HMAC-MD5", selected) ||
+        !SpeedHmac(EVP_sha1(), "HMAC-SHA1", selected) ||
+        !SpeedHmac(EVP_sha256(), "HMAC-SHA256", selected) ||
+        !SpeedHmac(EVP_sha384(), "HMAC-SHA384", selected) ||
+        !SpeedHmac(EVP_sha512(), "HMAC-SHA512", selected) ||
+        !SpeedHmacOneShot(EVP_md5(), "HMAC-MD5-OneShot", selected) ||
+        !SpeedHmacOneShot(EVP_sha1(), "HMAC-SHA1-OneShot", selected) ||
+        !SpeedHmacOneShot(EVP_sha256(), "HMAC-SHA256-OneShot", selected) ||
+        !SpeedHmacOneShot(EVP_sha384(), "HMAC-SHA384-OneShot", selected) ||
+        !SpeedHmacOneShot(EVP_sha512(), "HMAC-SHA512-OneShot", selected) ||
+        !SpeedRandom(selected) || !SpeedECDH(selected) ||
+        !SpeedECDSA(selected) || !SpeedECKeyGen(selected) ||
+        !SpeedECKeyGenerateKey(false, selected) ||
 #if !defined(OPENSSL_1_0_BENCHMARK)
-       // OpenSSL 1.0.2 is missing functions e.g. |EVP_PKEY_get0_EC_KEY| and
-       // doesn't implement X255519 either.
-       !SpeedEvpEcdh(selected) ||
-       !SpeedECMUL(selected) ||
-       // OpenSSL 1.0 doesn't support Scrypt
-       !SpeedScrypt(selected) ||
+        // OpenSSL 1.0.2 is missing functions e.g. |EVP_PKEY_get0_EC_KEY| and
+        // doesn't implement X255519 either.
+        !SpeedEvpEcdh(selected) || !SpeedECMUL(selected) ||
+        // OpenSSL 1.0 doesn't support Scrypt
+        !SpeedScrypt(selected) ||
 #endif
-       !SpeedRSA(selected) ||
-       !SpeedRSAKeyGen(false, selected) ||
-       !SpeedDHcheck(selected)
+        !SpeedRSA(selected) || !SpeedRSAKeyGen(false, selected) ||
+        !SpeedModExp(selected) || !SpeedDHcheck(selected) ||
+        !SpeedDHgeneratekey(selected)
 #if !defined(OPENSSL_BENCHMARK)
-       ||
+        ||
 #if AWSLC_API_VERSION > 16
-       !SpeedKEM(selected) ||
+        !SpeedKEM(selected) ||
 #endif
 #if defined(ENABLE_DILITHIUM) && AWSLC_API_VERSION > 20
-       !SpeedDigestSign(selected) ||
+        !SpeedDigestSign(selected) ||
 #endif
-       !SpeedAEADSeal(EVP_aead_aes_128_gcm(), "AEAD-AES-128-GCM", kTLSADLen, selected) ||
-       !SpeedAEADOpen(EVP_aead_aes_128_gcm(), "AEAD-AES-128-GCM", kTLSADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_aes_256_gcm(), "AEAD-AES-256-GCM", kTLSADLen, selected) ||
-       !SpeedAEADOpen(EVP_aead_aes_256_gcm(), "AEAD-AES-256-GCM", kTLSADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_chacha20_poly1305(), "AEAD-ChaCha20-Poly1305", kTLSADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_des_ede3_cbc_sha1_tls(), "AEAD-DES-EDE3-CBC-SHA1",kLegacyADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_aes_128_cbc_sha1_tls(), "AEAD-AES-128-CBC-SHA1",kLegacyADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_aes_256_cbc_sha1_tls(), "AEAD-AES-256-CBC-SHA1",kLegacyADLen, selected) ||
-       !SpeedAEADOpen(EVP_aead_aes_128_cbc_sha1_tls(), "AEAD-AES-128-CBC-SHA1", kLegacyADLen, selected) ||
-       !SpeedAEADOpen(EVP_aead_aes_256_cbc_sha1_tls(), "AEAD-AES-256-CBC-SHA1", kLegacyADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_aes_128_gcm_siv(), "AEAD-AES-128-GCM-SIV",kTLSADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_aes_256_gcm_siv(), "AEAD-AES-256-GCM-SIV",kTLSADLen, selected) ||
-       !SpeedAEADOpen(EVP_aead_aes_128_gcm_siv(), "AEAD-AES-128-GCM-SIV", kTLSADLen, selected) ||
-       !SpeedAEADOpen(EVP_aead_aes_256_gcm_siv(), "AEAD-AES-256-GCM-SIV", kTLSADLen, selected) ||
-       !SpeedAEADSeal(EVP_aead_aes_128_ccm_bluetooth(),"AEAD-AES-128-CCM-Bluetooth", kTLSADLen, selected) ||
-       !Speed25519(selected) ||
-       !SpeedSPAKE2(selected) ||
-       !SpeedRSAKeyGen(true, selected) ||
-       !SpeedHRSS(selected) ||
-       !SpeedHash(EVP_blake2b256(), "BLAKE2b-256", selected) ||
-       !SpeedECKeyGenerateKey(true, selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_128_gcm(), "AEAD-AES-128-GCM", kTLSADLen,
+                       selected) ||
+        !SpeedAEADOpen(EVP_aead_aes_128_gcm(), "AEAD-AES-128-GCM", kTLSADLen,
+                       selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_256_gcm(), "AEAD-AES-256-GCM", kTLSADLen,
+                       selected) ||
+        !SpeedAEADOpen(EVP_aead_aes_256_gcm(), "AEAD-AES-256-GCM", kTLSADLen,
+                       selected) ||
+        !SpeedAEADSeal(EVP_aead_chacha20_poly1305(), "AEAD-ChaCha20-Poly1305",
+                       kTLSADLen, selected) ||
+        !SpeedAEADSeal(EVP_aead_des_ede3_cbc_sha1_tls(),
+                       "AEAD-DES-EDE3-CBC-SHA1", kLegacyADLen, selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_128_cbc_sha1_tls(), "AEAD-AES-128-CBC-SHA1",
+                       kLegacyADLen, selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_256_cbc_sha1_tls(), "AEAD-AES-256-CBC-SHA1",
+                       kLegacyADLen, selected) ||
+        !SpeedAEADOpen(EVP_aead_aes_128_cbc_sha1_tls(), "AEAD-AES-128-CBC-SHA1",
+                       kLegacyADLen, selected) ||
+        !SpeedAEADOpen(EVP_aead_aes_256_cbc_sha1_tls(), "AEAD-AES-256-CBC-SHA1",
+                       kLegacyADLen, selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_128_gcm_siv(), "AEAD-AES-128-GCM-SIV",
+                       kTLSADLen, selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_256_gcm_siv(), "AEAD-AES-256-GCM-SIV",
+                       kTLSADLen, selected) ||
+        !SpeedAEADOpen(EVP_aead_aes_128_gcm_siv(), "AEAD-AES-128-GCM-SIV",
+                       kTLSADLen, selected) ||
+        !SpeedAEADOpen(EVP_aead_aes_256_gcm_siv(), "AEAD-AES-256-GCM-SIV",
+                       kTLSADLen, selected) ||
+        !SpeedAEADSeal(EVP_aead_aes_128_ccm_bluetooth(),
+                       "AEAD-AES-128-CCM-Bluetooth", kTLSADLen, selected) ||
+        !Speed25519(selected) || !SpeedSPAKE2(selected) ||
+        !SpeedRSAKeyGen(true, selected) || !SpeedHRSS(selected) ||
+        !SpeedHash(EVP_blake2b256(), "BLAKE2b-256", selected) ||
+        !SpeedECKeyGenerateKey(true, selected) ||
 #if defined(INTERNAL_TOOL)
-       !SpeedHashToCurve(selected) ||
-       !SpeedTrustToken("TrustToken-Exp1-Batch1", TRUST_TOKEN_experiment_v1(), 1, selected) ||
-       !SpeedTrustToken("TrustToken-Exp1-Batch10", TRUST_TOKEN_experiment_v1(), 10, selected) ||
-       !SpeedTrustToken("TrustToken-Exp2VOfPRF-Batch1", TRUST_TOKEN_experiment_v2_voprf(), 1, selected) ||
-       !SpeedTrustToken("TrustToken-Exp2VOPRF-Batch10", TRUST_TOKEN_experiment_v2_voprf(), 10, selected) ||
-       !SpeedTrustToken("TrustToken-Exp2PMB-Batch1", TRUST_TOKEN_experiment_v2_pmb(), 1, selected) ||
-       !SpeedTrustToken("TrustToken-Exp2PMB-Batch10", TRUST_TOKEN_experiment_v2_pmb(), 10, selected) ||
+        !SpeedHashToCurve(selected) ||
+        !SpeedTrustToken("TrustToken-Exp1-Batch1", TRUST_TOKEN_experiment_v1(),
+                         1, selected) ||
+        !SpeedTrustToken("TrustToken-Exp1-Batch10", TRUST_TOKEN_experiment_v1(),
+                         10, selected) ||
+        !SpeedTrustToken("TrustToken-Exp2VOfPRF-Batch1",
+                         TRUST_TOKEN_experiment_v2_voprf(), 1, selected) ||
+        !SpeedTrustToken("TrustToken-Exp2VOPRF-Batch10",
+                         TRUST_TOKEN_experiment_v2_voprf(), 10, selected) ||
+        !SpeedTrustToken("TrustToken-Exp2PMB-Batch1",
+                         TRUST_TOKEN_experiment_v2_pmb(), 1, selected) ||
+        !SpeedTrustToken("TrustToken-Exp2PMB-Batch10",
+                         TRUST_TOKEN_experiment_v2_pmb(), 10, selected) ||
 #endif
 #if AWSLC_API_VERSION > 16
-       !SpeedPKCS8(selected) ||
+        !SpeedPKCS8(selected) ||
 #endif
-       !SpeedBase64(selected) ||
-       !SpeedSipHash(selected)
+        !SpeedBase64(selected) || !SpeedSipHash(selected)
 #endif
-       ) {
+    ) {
       return false;
-    }
+       }
 
 #if defined(AWSLC_FIPS)
     if (!SpeedSelfTest(selected) ||
